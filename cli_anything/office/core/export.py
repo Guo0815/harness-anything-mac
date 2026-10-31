@@ -4,6 +4,8 @@
 """
 
 import os
+from html import escape
+from pathlib import Path
 import tempfile
 from typing import Dict, Any, Optional
 
@@ -175,6 +177,9 @@ def export(
         RuntimeError: COM 不可用或导出失败
         FileExistsError: 输出文件已存在且未启用覆盖
     """
+    if not COM_AVAILABLE and preset in {"docx", "pdf"}:
+        return _export_writer_headless(project, output_path, preset, overwrite)
+
     if not COM_AVAILABLE:
         raise RuntimeError(
             "WPS COM 自动化不可用。请在 Windows 上运行并确保 WPS Office 已安装。"
@@ -243,6 +248,87 @@ def export(
             except Exception:
                 pass
         raise
+
+
+def _export_writer_headless(project, output_path, preset, overwrite):
+    """保留 Writer 结构，通过 HTML → ODT → DOCX → PDF 导出。"""
+    from cli_anything.office.utils.office_backend import convert_to, get_backend
+
+    if project.get("type") != "writer":
+        raise ValueError("DOCX/PDF 导出需要 Writer 项目。")
+    backend = get_backend()
+    if backend != "libreoffice-headless":
+        raise RuntimeError("Writer 跨平台导出需要 LibreOffice headless。")
+    info = get_preset_info(preset)
+    output_path = os.path.abspath(output_path)
+    if not output_path.lower().endswith(info["extension"]):
+        output_path += info["extension"]
+    if os.path.exists(output_path) and not overwrite:
+        raise FileExistsError(f"输出文件已存在: {output_path}。使用 --overwrite 覆盖。")
+
+    with tempfile.TemporaryDirectory(prefix="office-writer-") as tmp:
+        source = os.path.join(tmp, "writer.html")
+        with open(source, "w", encoding="utf-8") as stream:
+            stream.write(_build_writer_html(project))
+        docx_path = output_path if preset == "docx" else os.path.join(tmp, "writer.docx")
+        # HTML 由 Writer Web 打开；先转 ODT，确保使用 Writer 的 DOCX 过滤器。
+        odt_path = os.path.join(tmp, "writer.odt")
+        convert_to(source, "odt", output_path=odt_path)
+        result = convert_to(odt_path, "docx", output_path=docx_path, overwrite=overwrite)
+        if preset == "pdf":
+            result = convert_to(docx_path, "pdf", output_path=output_path, overwrite=overwrite)
+    result.update(extension=info["extension"], preset=preset, backend=backend)
+    return result
+
+
+def _build_writer_html(project):
+    """使用语义化标题、段落和表格，避免纯文本中间文件丢失结构。"""
+    def text(value):
+        return escape(str(value)).replace("\n", "<br>")
+
+    parts = ['<!DOCTYPE html><html><head><meta charset="utf-8">',
+             '<style>body { font-family: "Noto Sans CJK SC", sans-serif; } '
+             'p, td { white-space: pre-wrap; } '
+             'table { border-collapse: collapse; width: 100%; } '
+             'td { border: 1px solid black; padding: 4px; }</style></head><body>']
+    for item in project.get("content", []):
+        kind = item.get("type", "paragraph")
+        if kind in {"heading", "paragraph"}:
+            tag = "p"
+            if kind == "heading":
+                level = max(1, min(int(item.get("level", 1)), 6))
+                tag = f"h{level}"
+            content = text(item.get("text", ""))
+            style = item.get("style", {})
+            for key, wrapper in (("bold", "b"), ("italic", "i"), ("underline", "u")):
+                if style.get(key):
+                    content = f"<{wrapper}>{content}</{wrapper}>"
+            parts.append(f"<{tag}>{content}</{tag}>")
+        elif kind == "table":
+            data = item.get("data", [])
+            rows = item.get("rows", len(data))
+            cols = item.get("cols", max((len(row) for row in data), default=0))
+            parts.append('<table border="1" width="100%" cellspacing="0" cellpadding="4">')
+            for ri in range(rows):
+                row = data[ri] if ri < len(data) else []
+                parts.append('<tr>' + ''.join(
+                    f'<td>{text(row[ci] if ci < len(row) else "")}</td>'
+                    for ci in range(cols)) + '</tr>')
+            parts.append('</table>')
+        elif kind == "list":
+            tag = "ol" if item.get("list_style") == "number" else "ul"
+            parts.append(f"<{tag}>" + ''.join(
+                f"<li>{text(value)}</li>" for value in item.get("items", [])) + f"</{tag}>")
+        elif kind == "page_break":
+            parts.append('<p style="page-break-before: always;"></p>')
+        elif kind == "image_ref":
+            path = Path(item.get("path", "")).resolve()
+            if path.is_file():
+                parts.append(f'<p><img src="{escape(path.as_uri(), quote=True)}"></p>')
+        else:
+            raise ValueError(f"不支持的 Writer 内容类型: {kind}")
+    parts.append('</body></html>')
+    return "\n".join(parts)
 
 
 def _fill_document(doc, project: Dict[str, Any], doc_type: str) -> None:
