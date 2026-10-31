@@ -11,12 +11,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from cli_anything.wps.core import document
-from cli_anything.wps.core import writer
-from cli_anything.wps.core import calc
-from cli_anything.wps.core import impress
-from cli_anything.wps.core import styles
-from cli_anything.wps.core.session import Session
+from cli_anything.office.core import document
+from cli_anything.office.core import writer
+from cli_anything.office.core import calc
+from cli_anything.office.core import impress
+from cli_anything.office.core import styles
+from cli_anything.office.core.session import Session
 
 
 class TestDocumentCreate:
